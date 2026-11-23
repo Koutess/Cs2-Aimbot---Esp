@@ -15,11 +15,11 @@ namespace cfg {
     inline bool  esp_skeleton = false;
     inline bool  aimbot       = true;
     inline bool  team_check   = true;
-    inline float aim_fov      = 4.0f;
-    inline float aim_smooth   = 2.8f;
+    inline float aim_fov      = 4.5f;
+    inline float aim_smooth   = 2.4f;
     inline int   aim_bone     = 6;
     inline int   aim_key      = VK_XBUTTON2;
-    inline float max_dist     = 160.f;
+    inline float max_dist     = 180.f;
     inline float mouse_sens   = 0.022f;
 }
 
@@ -34,41 +34,86 @@ public:
     Memory  mem;
     Overlay ov;
     int players_found = 0;
-    bool attached = false;
+    bool patterns_ok = false;
 
     bool init() {
         AllocConsole();
         FILE* f;
         freopen_s(&f, "CONOUT$", "w", stdout);
-        freopen_s(&f, "CONOUT$", "w", stderr);
 
-        printf("[*] Looking for cs2.exe ...\n");
-        if (!mem.attach(L"cs2.exe")) {
-            printf("[-] cs2.exe not found. Start the game first.\n");
-            MessageBoxW(nullptr, L"cs2.exe not found.\nStart Counter-Strike 2 first.", L"CS2 External", MB_ICONERROR);
-            return false;
+        printf("[*] Waiting for cs2.exe ...\n");
+        while (!mem.attach(L"cs2.exe")) {
+            Sleep(1000);
         }
-        printf("[+] Attached to PID %u\n", mem.pid);
+        printf("[+] Attached (PID %u)\n", mem.pid);
 
-        mem.client = mem.module_base(L"client.dll");
+        mem.client = mem.module_base(L"client.dll", &mem.client_size);
         if (!mem.client) {
-            printf("[-] client.dll base not found\n");
-            MessageBoxW(nullptr, L"client.dll not found.", L"CS2 External", MB_ICONERROR);
+            printf("[-] client.dll not found\n");
             return false;
         }
-        printf("[+] client.dll @ 0x%llX\n", (unsigned long long)mem.client);
+        printf("[+] client.dll @ 0x%llX  size 0x%zX\n", (unsigned long long)mem.client, mem.client_size);
 
-        if (!ov.create()) {
-            printf("[-] Overlay creation failed\n");
+        if (!resolve_offsets()) {
+            printf("[-] Pattern scan failed. Game may have updated hard.\n");
+            MessageBoxW(nullptr, L"Pattern scan failed.\nGame update broke the signatures.", L"CS2 External", MB_ICONERROR);
             return false;
         }
-        printf("[+] Overlay ready (%dx%d)\n", ov.w, ov.h);
-        printf("[*] INSERT = toggle menu | END = exit\n");
-        printf("[*] Hold XBUTTON2 (side mouse) to aim\n");
-        printf("[!] Offsets are placeholders — update src/offsets.hpp or you will see 0 players\n");
+        patterns_ok = true;
 
-        attached = true;
+        if (!ov.create()) return false;
+        printf("[+] Overlay ready\n");
+        printf("[*] INSERT = menu | END = exit | XBUTTON2 = aim\n");
         return true;
+    }
+
+    bool resolve_offsets() {
+        printf("[*] Scanning patterns ...\n");
+
+        // These patterns are the common stable ones used by public externals.
+        // They still break on big updates, but much less often than raw offsets.
+        // dwEntityList
+        auto e1 = mem.find_pattern(mem.client, mem.client_size,
+            "48 8B 0D ? ? ? ? 48 89 7C 24 ? 8B FA C1 EB");
+        if (e1) {
+            offsets::dwEntityList = mem.resolve_rel32(e1) - mem.client;
+            printf("  dwEntityList        = 0x%llX\n", (unsigned long long)offsets::dwEntityList);
+        }
+
+        // dwLocalPlayerPawn
+        auto e2 = mem.find_pattern(mem.client, mem.client_size,
+            "48 8B 05 ? ? ? ? 48 85 C0 74 0C 8B 40");
+        if (e2) {
+            offsets::dwLocalPlayerPawn = mem.resolve_rel32(e2) - mem.client;
+            printf("  dwLocalPlayerPawn   = 0x%llX\n", (unsigned long long)offsets::dwLocalPlayerPawn);
+        }
+
+        // dwViewMatrix
+        auto e3 = mem.find_pattern(mem.client, mem.client_size,
+            "48 8D 0D ? ? ? ? 48 C1 E0 06");
+        if (e3) {
+            offsets::dwViewMatrix = mem.resolve_rel32(e3) - mem.client;
+            printf("  dwViewMatrix        = 0x%llX\n", (unsigned long long)offsets::dwViewMatrix);
+        }
+
+        // Fallback / secondary patterns if the first ones miss
+        if (!offsets::dwEntityList) {
+            e1 = mem.find_pattern(mem.client, mem.client_size, "48 8B 0D ? ? ? ? E8 ? ? ? ? 48 8B F0");
+            if (e1) offsets::dwEntityList = mem.resolve_rel32(e1) - mem.client;
+        }
+        if (!offsets::dwLocalPlayerPawn) {
+            e2 = mem.find_pattern(mem.client, mem.client_size, "48 8B 05 ? ? ? ? 48 85 C0 74 ? 8B 40 ? 24");
+            if (e2) offsets::dwLocalPlayerPawn = mem.resolve_rel32(e2) - mem.client;
+        }
+        if (!offsets::dwViewMatrix) {
+            e3 = mem.find_pattern(mem.client, mem.client_size, "48 8D 0D ? ? ? ? 48 C1 E0 06 48 03 C1");
+            if (e3) offsets::dwViewMatrix = mem.resolve_rel32(e3) - mem.client;
+        }
+
+        bool ok = offsets::dwEntityList && offsets::dwLocalPlayerPawn && offsets::dwViewMatrix;
+        if (ok) printf("[+] All critical offsets resolved\n");
+        else    printf("[-] Missing critical offsets\n");
+        return ok;
     }
 
     std::uintptr_t local_pawn() {
@@ -136,26 +181,25 @@ public:
 
     void draw_menu() {
         if (!cfg::menu_open) return;
+        const int mx = 40, my = 40, mw = 280, mh = 240;
+        ov.filled_rect(mx, my, mw, mh, RGB(15, 15, 20));
+        ov.rect(mx, my, mw, mh, RGB(0, 190, 255), 1);
 
-        const int mx = 40, my = 40, mw = 260, mh = 220;
-        ov.filled_rect(mx, my, mw, mh, RGB(20, 20, 25));
-        ov.rect(mx, my, mw, mh, RGB(0, 180, 255), 1);
+        ov.text(mx + 12, my + 10, L"CS2 EXTERNAL  (AUTO)", RGB(0, 200, 255));
+        ov.text(mx + 12, my + 32, L"INSERT = toggle menu", RGB(150, 150, 150));
+        ov.text(mx + 12, my + 50, L"END    = exit", RGB(150, 150, 150));
 
-        ov.text(mx + 12, my + 10, L"CS2 EXTERNAL", RGB(0, 200, 255));
-        ov.text(mx + 12, my + 32, L"INSERT = close menu", RGB(160, 160, 160));
-        ov.text(mx + 12, my + 52, L"END    = exit", RGB(160, 160, 160));
-
-        auto onoff = [](bool v) -> std::wstring { return v ? L"[ON] " : L"[OFF]"; };
-
-        ov.text(mx + 12, my + 80,  onoff(cfg::esp_box)      + L" ESP Box      (F1)", cfg::esp_box ? RGB(80,255,80) : RGB(200,80,80));
-        ov.text(mx + 12, my + 100, onoff(cfg::esp_health)   + L" Health Bar   (F2)", cfg::esp_health ? RGB(80,255,80) : RGB(200,80,80));
-        ov.text(mx + 12, my + 120, onoff(cfg::esp_skeleton) + L" Skeleton     (F3)", cfg::esp_skeleton ? RGB(80,255,80) : RGB(200,80,80));
-        ov.text(mx + 12, my + 140, onoff(cfg::aimbot)       + L" Aimbot       (F4)", cfg::aimbot ? RGB(80,255,80) : RGB(200,80,80));
-        ov.text(mx + 12, my + 160, onoff(cfg::team_check)   + L" Team Check   (F5)", cfg::team_check ? RGB(80,255,80) : RGB(200,80,80));
+        auto on = [](bool v) -> std::wstring { return v ? L"[ON]  " : L"[OFF] "; };
+        ov.text(mx + 12, my + 80,  on(cfg::esp_box)      + L"ESP Box     F1", cfg::esp_box ? RGB(80,255,80) : RGB(220,80,80));
+        ov.text(mx + 12, my + 100, on(cfg::esp_health)   + L"Health      F2", cfg::esp_health ? RGB(80,255,80) : RGB(220,80,80));
+        ov.text(mx + 12, my + 120, on(cfg::esp_skeleton) + L"Skeleton    F3", cfg::esp_skeleton ? RGB(80,255,80) : RGB(220,80,80));
+        ov.text(mx + 12, my + 140, on(cfg::aimbot)       + L"Aimbot      F4", cfg::aimbot ? RGB(80,255,80) : RGB(220,80,80));
+        ov.text(mx + 12, my + 160, on(cfg::team_check)   + L"Team Check  F5", cfg::team_check ? RGB(80,255,80) : RGB(220,80,80));
 
         wchar_t buf[64];
-        swprintf_s(buf, L"Players: %d", players_found);
-        ov.text(mx + 12, my + 190, buf, players_found > 0 ? RGB(80,255,80) : RGB(255,180,0));
+        swprintf_s(buf, L"Players visible: %d", players_found);
+        ov.text(mx + 12, my + 195, buf, players_found > 0 ? RGB(80,255,80) : RGB(255,180,0));
+        ov.text(mx + 12, my + 215, patterns_ok ? L"Patterns: OK" : L"Patterns: FAIL", patterns_ok ? RGB(80,255,80) : RGB(255,80,80));
     }
 
     void draw_esp(const std::vector<Player>& list, const Matrix4x4& vm) {
@@ -170,23 +214,18 @@ public:
             int y = (int)head.y;
             int bw = (int)width;
             int bh = (int)height;
-
             COLORREF col = (p.team == 2) ? RGB(255, 70, 70) : RGB(70, 160, 255);
 
-            if (cfg::esp_box)
-                ov.rect(x, y, bw, bh, col, 1);
-
+            if (cfg::esp_box) ov.rect(x, y, bw, bh, col, 1);
             if (cfg::esp_health) {
                 int bar = (int)(bh * (p.health / 100.f));
                 ov.filled_rect(x - 6, y + (bh - bar), 3, bar, RGB(0, 220, 80));
             }
-
             if (cfg::esp_skeleton) {
                 Vec3 neck = bone_pos(p.pawn, 5);
                 Vec3 pelvis = bone_pos(p.pawn, 0);
                 Vec2 n, pel;
-                if (world_to_screen(neck, n, vm, ov.w, ov.h) &&
-                    world_to_screen(pelvis, pel, vm, ov.w, ov.h)) {
+                if (world_to_screen(neck, n, vm, ov.w, ov.h) && world_to_screen(pelvis, pel, vm, ov.w, ov.h)) {
                     ov.line((int)head.x, (int)head.y, (int)n.x, (int)n.y, col);
                     ov.line((int)n.x, (int)n.y, (int)pel.x, (int)pel.y, col);
                 }
@@ -196,67 +235,59 @@ public:
 
     void aim(const std::vector<Player>& list) {
         if (!(GetAsyncKeyState(cfg::aim_key) & 0x8000)) return;
-
         auto local = local_pawn();
         if (!local) return;
 
         Vec3 origin = mem.read<Vec3>(local + offsets::m_vOldOrigin);
         Vec3 viewOff = mem.read<Vec3>(local + offsets::m_vecViewOffset);
         Vec3 eye = { origin.x + viewOff.x, origin.y + viewOff.y, origin.z + viewOff.z };
-        Vec3 view = mem.read<Vec3>(mem.client + offsets::dwViewAngles);
 
-        float best = cfg::aim_fov;
-        Vec3 target{};
-        bool found = false;
+        // We don't have a reliable viewangles offset auto-resolved in this version,
+        // so we use a pure mouse delta toward the target (works without viewangles).
+        float bestFov = cfg::aim_fov * 20.f; // screen-space approximation
+        Vec2  bestDelta{};
+        bool  found = false;
+
+        Matrix4x4 vm = view_matrix();
+        Vec2 center = { ov.w / 2.f, ov.h / 2.f };
 
         for (const auto& p : list) {
             if (eye.dist(p.head) > cfg::max_dist * 40.f) continue;
-            Vec3 ang = calc_angle(eye, p.head);
-            float fov = get_fov(view, ang);
-            if (fov < best) {
-                best = fov;
-                target = ang;
+            Vec2 screen;
+            if (!world_to_screen(p.head, screen, vm, ov.w, ov.h)) continue;
+
+            float dx = screen.x - center.x;
+            float dy = screen.y - center.y;
+            float fov = std::sqrt(dx*dx + dy*dy);
+            if (fov < bestFov) {
+                bestFov = fov;
+                bestDelta = { dx, dy };
                 found = true;
             }
         }
         if (!found) return;
 
-        float dy = target.y - view.y;
-        while (dy >  180.f) dy -= 360.f;
-        while (dy < -180.f) dy += 360.f;
-        float dx = target.x - view.x;
+        // smooth + micro jitter
+        bestDelta.x /= cfg::aim_smooth;
+        bestDelta.y /= cfg::aim_smooth;
+        bestDelta.x += (rand() % 3 - 1) * 0.4f;
+        bestDelta.y += (rand() % 3 - 1) * 0.4f;
 
-        dx /= cfg::aim_smooth;
-        dy /= cfg::aim_smooth;
-        dx += (rand() % 3 - 1) * 0.012f;
-        dy += (rand() % 3 - 1) * 0.012f;
-
-        mouse_event(MOUSEEVENTF_MOVE,
-            (DWORD)(dy / cfg::mouse_sens),
-            (DWORD)(-dx / cfg::mouse_sens),
-            0, 0);
+        mouse_event(MOUSEEVENTF_MOVE, (DWORD)bestDelta.x, (DWORD)bestDelta.y, 0, 0);
     }
 
     void handle_hotkeys() {
-        static bool insert_down = false, f1=false, f2=false, f3=false, f4=false, f5=false;
-
+        static bool ins=false, f1=false, f2=false, f3=false, f4=false, f5=false;
         if (GetAsyncKeyState(VK_INSERT) & 0x8000) {
-            if (!insert_down) {
-                cfg::menu_open = !cfg::menu_open;
-                ov.set_click_through(!cfg::menu_open);
-                insert_down = true;
-            }
-        } else insert_down = false;
+            if (!ins) { cfg::menu_open = !cfg::menu_open; ov.set_click_through(!cfg::menu_open); ins=true; }
+        } else ins=false;
 
-        if (GetAsyncKeyState(VK_F1) & 0x8000) { if (!f1) { cfg::esp_box = !cfg::esp_box; f1=true; } } else f1=false;
-        if (GetAsyncKeyState(VK_F2) & 0x8000) { if (!f2) { cfg::esp_health = !cfg::esp_health; f2=true; } } else f2=false;
-        if (GetAsyncKeyState(VK_F3) & 0x8000) { if (!f3) { cfg::esp_skeleton = !cfg::esp_skeleton; f3=true; } } else f3=false;
-        if (GetAsyncKeyState(VK_F4) & 0x8000) { if (!f4) { cfg::aimbot = !cfg::aimbot; f4=true; } } else f4=false;
-        if (GetAsyncKeyState(VK_F5) & 0x8000) { if (!f5) { cfg::team_check = !cfg::team_check; f5=true; } } else f5=false;
-
-        if (GetAsyncKeyState(VK_END) & 0x8000) {
-            PostQuitMessage(0);
-        }
+        if (GetAsyncKeyState(VK_F1) & 0x8000) { if (!f1) { cfg::esp_box=!cfg::esp_box; f1=true; } } else f1=false;
+        if (GetAsyncKeyState(VK_F2) & 0x8000) { if (!f2) { cfg::esp_health=!cfg::esp_health; f2=true; } } else f2=false;
+        if (GetAsyncKeyState(VK_F3) & 0x8000) { if (!f3) { cfg::esp_skeleton=!cfg::esp_skeleton; f3=true; } } else f3=false;
+        if (GetAsyncKeyState(VK_F4) & 0x8000) { if (!f4) { cfg::aimbot=!cfg::aimbot; f4=true; } } else f4=false;
+        if (GetAsyncKeyState(VK_F5) & 0x8000) { if (!f5) { cfg::team_check=!cfg::team_check; f5=true; } } else f5=false;
+        if (GetAsyncKeyState(VK_END) & 0x8000) PostQuitMessage(0);
     }
 
     void run() {
@@ -267,11 +298,9 @@ public:
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-
             if (!mem.hProcess) break;
 
             handle_hotkeys();
-
             auto list = collect();
             auto vm = view_matrix();
 
@@ -279,9 +308,7 @@ public:
             draw_esp(list, vm);
             if (cfg::aimbot) aim(list);
             draw_menu();
-            // force redraw
             InvalidateRect(ov.hwnd, nullptr, FALSE);
-
             Sleep(1);
         }
     }

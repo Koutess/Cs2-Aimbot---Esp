@@ -65,7 +65,6 @@ public:
         return ReadProcessMemory(hProcess, reinterpret_cast<LPCVOID>(addr), buf, size, &br) && br == size;
     }
 
-    // Simple pattern scan (IDA style: "48 8B 0D ? ? ? ? 48 85 C9")
     std::uintptr_t find_pattern(std::uintptr_t start, size_t size, const char* pattern) {
         auto parse = [](const char* pat, std::vector<int>& out) {
             out.clear();
@@ -73,7 +72,7 @@ public:
                 if (*p == ' ') continue;
                 if (*p == '?') {
                     out.push_back(-1);
-                    if (*(p+1) == '?') ++p;
+                    if (*(p + 1) == '?') ++p;
                 } else {
                     char buf[3] = { p[0], p[1], 0 };
                     out.push_back((int)strtoul(buf, nullptr, 16));
@@ -81,7 +80,6 @@ public:
                 }
             }
         };
-
         std::vector<int> bytes;
         parse(pattern, bytes);
         if (bytes.empty()) return 0;
@@ -102,7 +100,6 @@ public:
         return 0;
     }
 
-    // Resolve RIP-relative (e.g. 48 8B 0D [rel32])
     std::uintptr_t resolve_rel32(std::uintptr_t instr, int offset = 3, int instr_size = 7) {
         int32_t rel = read<int32_t>(instr + offset);
         return instr + instr_size + rel;

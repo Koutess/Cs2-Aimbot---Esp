@@ -9,67 +9,88 @@ class Overlay {
 public:
     HWND hwnd = nullptr;
     HDC  hdc = nullptr;
-    int  width = 0, height = 0;
+    int  w = 0, h = 0;
+    bool click_through = true;
 
-    bool create(const wchar_t* className = L"CEF-OSC-WIDGET") { // generic looking name
-        width  = GetSystemMetrics(SM_CXSCREEN);
-        height = GetSystemMetrics(SM_CYSCREEN);
+    static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wParam, LPARAM lParam) {
+        if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
+        return DefWindowProcW(h, m, wParam, lParam);
+    }
+
+    bool create() {
+        w = GetSystemMetrics(SM_CXSCREEN);
+        h = GetSystemMetrics(SM_CYSCREEN);
 
         WNDCLASSEXW wc{ sizeof(wc) };
-        wc.lpfnWndProc   = DefWindowProcW;
+        wc.lpfnWndProc   = WndProc;
         wc.hInstance     = GetModuleHandleW(nullptr);
-        wc.lpszClassName = className;
+        wc.lpszClassName = L"Valve001";
+        wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
         RegisterClassExW(&wc);
 
         hwnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
-            className, L"",
+            WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+            L"Valve001", L"CS2 Overlay",
             WS_POPUP,
-            0, 0, width, height,
+            0, 0, w, h,
             nullptr, nullptr, wc.hInstance, nullptr);
 
         if (!hwnd) return false;
 
         SetLayeredWindowAttributes(hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
         ShowWindow(hwnd, SW_SHOW);
+        UpdateWindow(hwnd);
         hdc = GetDC(hwnd);
+        set_click_through(true);
         return true;
     }
 
+    void set_click_through(bool enable) {
+        click_through = enable;
+        LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        if (enable)
+            ex |= WS_EX_TRANSPARENT;
+        else
+            ex &= ~WS_EX_TRANSPARENT;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
+    }
+
     void begin() {
-        // clear with color key
-        HBRUSH brush = CreateSolidBrush(RGB(0, 0, 0));
-        RECT rc{ 0, 0, width, height };
-        FillRect(hdc, &rc, brush);
-        DeleteObject(brush);
+        HBRUSH br = CreateSolidBrush(RGB(0, 0, 0));
+        RECT rc{ 0, 0, w, h };
+        FillRect(hdc, &rc, br);
+        DeleteObject(br);
     }
 
-    void end() {
-        // nothing special for GDI color-key
-    }
-
-    void rect(int x, int y, int w, int h, COLORREF col, int thickness = 1) {
-        HPEN pen = CreatePen(PS_SOLID, thickness, col);
-        HGDIOBJ old = SelectObject(hdc, pen);
+    void rect(int x, int y, int bw, int bh, COLORREF col, int thick = 1) {
+        HPEN pen = CreatePen(PS_SOLID, thick, col);
+        auto old = SelectObject(hdc, pen);
         SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        Rectangle(hdc, x, y, x + w, y + h);
+        Rectangle(hdc, x, y, x + bw, y + bh);
         SelectObject(hdc, old);
         DeleteObject(pen);
     }
 
-    void line(int x1, int y1, int x2, int y2, COLORREF col, int thickness = 1) {
-        HPEN pen = CreatePen(PS_SOLID, thickness, col);
-        HGDIOBJ old = SelectObject(hdc, pen);
+    void filled_rect(int x, int y, int bw, int bh, COLORREF col) {
+        HBRUSH br = CreateSolidBrush(col);
+        RECT rc{ x, y, x + bw, y + bh };
+        FillRect(hdc, &rc, br);
+        DeleteObject(br);
+    }
+
+    void line(int x1, int y1, int x2, int y2, COLORREF col, int thick = 1) {
+        HPEN pen = CreatePen(PS_SOLID, thick, col);
+        auto old = SelectObject(hdc, pen);
         MoveToEx(hdc, x1, y1, nullptr);
         LineTo(hdc, x2, y2);
         SelectObject(hdc, old);
         DeleteObject(pen);
     }
 
-    void text(int x, int y, const std::wstring& str, COLORREF col) {
+    void text(int x, int y, const std::wstring& s, COLORREF col) {
         SetTextColor(hdc, col);
         SetBkMode(hdc, TRANSPARENT);
-        TextOutW(hdc, x, y, str.c_str(), static_cast<int>(str.size()));
+        TextOutW(hdc, x, y, s.c_str(), (int)s.size());
     }
 
     void destroy() {

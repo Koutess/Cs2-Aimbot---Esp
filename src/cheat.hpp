@@ -20,7 +20,6 @@ namespace cfg {
     inline int   aim_bone     = 6;
     inline int   aim_key      = VK_XBUTTON2;
     inline float max_dist     = 180.f;
-    inline float mouse_sens   = 0.022f;
 }
 
 struct Player {
@@ -34,7 +33,7 @@ public:
     Memory  mem;
     Overlay ov;
     int players_found = 0;
-    bool patterns_ok = false;
+    bool ready = false;
 
     bool init() {
         AllocConsole();
@@ -42,9 +41,7 @@ public:
         freopen_s(&f, "CONOUT$", "w", stdout);
 
         printf("[*] Waiting for cs2.exe ...\n");
-        while (!mem.attach(L"cs2.exe")) {
-            Sleep(1000);
-        }
+        while (!mem.attach(L"cs2.exe")) Sleep(800);
         printf("[+] Attached (PID %u)\n", mem.pid);
 
         mem.client = mem.module_base(L"client.dll", &mem.client_size);
@@ -52,68 +49,19 @@ public:
             printf("[-] client.dll not found\n");
             return false;
         }
-        printf("[+] client.dll @ 0x%llX  size 0x%zX\n", (unsigned long long)mem.client, mem.client_size);
+        printf("[+] client.dll @ 0x%llX\n", (unsigned long long)mem.client);
 
-        if (!resolve_offsets()) {
-            printf("[-] Pattern scan failed. Game may have updated hard.\n");
-            MessageBoxW(nullptr, L"Pattern scan failed.\nGame update broke the signatures.", L"CS2 External", MB_ICONERROR);
-            return false;
-        }
-        patterns_ok = true;
+        // Hardcoded from your dump (Build 14200)
+        printf("[*] Using dump offsets (Build 14200)\n");
+        printf("  dwEntityList      = 0x%llX\n", (unsigned long long)offsets::dwEntityList);
+        printf("  dwLocalPlayerPawn = 0x%llX\n", (unsigned long long)offsets::dwLocalPlayerPawn);
+        printf("  dwViewMatrix      = 0x%llX\n", (unsigned long long)offsets::dwViewMatrix);
 
         if (!ov.create()) return false;
         printf("[+] Overlay ready\n");
-        printf("[*] INSERT = menu | END = exit | XBUTTON2 = aim\n");
+        printf("[*] INSERT = menu | END = exit | Side mouse = aim\n");
+        ready = true;
         return true;
-    }
-
-    bool resolve_offsets() {
-        printf("[*] Scanning patterns ...\n");
-
-        // These patterns are the common stable ones used by public externals.
-        // They still break on big updates, but much less often than raw offsets.
-        // dwEntityList
-        auto e1 = mem.find_pattern(mem.client, mem.client_size,
-            "48 8B 0D ? ? ? ? 48 89 7C 24 ? 8B FA C1 EB");
-        if (e1) {
-            offsets::dwEntityList = mem.resolve_rel32(e1) - mem.client;
-            printf("  dwEntityList        = 0x%llX\n", (unsigned long long)offsets::dwEntityList);
-        }
-
-        // dwLocalPlayerPawn
-        auto e2 = mem.find_pattern(mem.client, mem.client_size,
-            "48 8B 05 ? ? ? ? 48 85 C0 74 0C 8B 40");
-        if (e2) {
-            offsets::dwLocalPlayerPawn = mem.resolve_rel32(e2) - mem.client;
-            printf("  dwLocalPlayerPawn   = 0x%llX\n", (unsigned long long)offsets::dwLocalPlayerPawn);
-        }
-
-        // dwViewMatrix
-        auto e3 = mem.find_pattern(mem.client, mem.client_size,
-            "48 8D 0D ? ? ? ? 48 C1 E0 06");
-        if (e3) {
-            offsets::dwViewMatrix = mem.resolve_rel32(e3) - mem.client;
-            printf("  dwViewMatrix        = 0x%llX\n", (unsigned long long)offsets::dwViewMatrix);
-        }
-
-        // Fallback / secondary patterns if the first ones miss
-        if (!offsets::dwEntityList) {
-            e1 = mem.find_pattern(mem.client, mem.client_size, "48 8B 0D ? ? ? ? E8 ? ? ? ? 48 8B F0");
-            if (e1) offsets::dwEntityList = mem.resolve_rel32(e1) - mem.client;
-        }
-        if (!offsets::dwLocalPlayerPawn) {
-            e2 = mem.find_pattern(mem.client, mem.client_size, "48 8B 05 ? ? ? ? 48 85 C0 74 ? 8B 40 ? 24");
-            if (e2) offsets::dwLocalPlayerPawn = mem.resolve_rel32(e2) - mem.client;
-        }
-        if (!offsets::dwViewMatrix) {
-            e3 = mem.find_pattern(mem.client, mem.client_size, "48 8D 0D ? ? ? ? 48 C1 E0 06 48 03 C1");
-            if (e3) offsets::dwViewMatrix = mem.resolve_rel32(e3) - mem.client;
-        }
-
-        bool ok = offsets::dwEntityList && offsets::dwLocalPlayerPawn && offsets::dwViewMatrix;
-        if (ok) printf("[+] All critical offsets resolved\n");
-        else    printf("[-] Missing critical offsets\n");
-        return ok;
     }
 
     std::uintptr_t local_pawn() {
@@ -131,9 +79,15 @@ public:
     Vec3 bone_pos(std::uintptr_t pawn, int bone) {
         auto scene = mem.read<std::uintptr_t>(pawn + offsets::m_pGameSceneNode);
         if (!scene) return {};
-        auto arr = mem.read<std::uintptr_t>(scene + offsets::m_modelState + offsets::m_boneArray);
-        if (!arr) return {};
-        return mem.read<Vec3>(arr + bone * 32);
+        auto boneArray = mem.read<std::uintptr_t>(scene + offsets::m_modelState + offsets::m_boneArray);
+        if (!boneArray) return {};
+        return mem.read<Vec3>(boneArray + bone * 32);
+    }
+
+    bool is_dormant(std::uintptr_t pawn) {
+        auto scene = mem.read<std::uintptr_t>(pawn + offsets::m_pGameSceneNode);
+        if (!scene) return true;
+        return mem.read<bool>(scene + offsets::m_bDormant);
     }
 
     std::vector<Player> collect() {
@@ -165,8 +119,7 @@ public:
             int team = mem.read<int>(pawn + offsets::m_iTeamNum);
             if (cfg::team_check && team == localTeam) continue;
 
-            bool dorm = mem.read<bool>(pawn + offsets::m_bDormant);
-            if (dorm) continue;
+            if (is_dormant(pawn)) continue;
 
             Vec3 org = mem.read<Vec3>(pawn + offsets::m_vOldOrigin);
             Vec3 head = bone_pos(pawn, cfg::aim_bone);
@@ -181,25 +134,24 @@ public:
 
     void draw_menu() {
         if (!cfg::menu_open) return;
-        const int mx = 40, my = 40, mw = 280, mh = 240;
+        const int mx = 40, my = 40, mw = 280, mh = 230;
         ov.filled_rect(mx, my, mw, mh, RGB(15, 15, 20));
         ov.rect(mx, my, mw, mh, RGB(0, 190, 255), 1);
 
-        ov.text(mx + 12, my + 10, L"CS2 EXTERNAL  (AUTO)", RGB(0, 200, 255));
-        ov.text(mx + 12, my + 32, L"INSERT = toggle menu", RGB(150, 150, 150));
-        ov.text(mx + 12, my + 50, L"END    = exit", RGB(150, 150, 150));
+        ov.text(mx + 12, my + 10, L"CS2 EXTERNAL", RGB(0, 200, 255));
+        ov.text(mx + 12, my + 32, L"INSERT = menu | END = exit", RGB(150, 150, 150));
 
         auto on = [](bool v) -> std::wstring { return v ? L"[ON]  " : L"[OFF] "; };
-        ov.text(mx + 12, my + 80,  on(cfg::esp_box)      + L"ESP Box     F1", cfg::esp_box ? RGB(80,255,80) : RGB(220,80,80));
-        ov.text(mx + 12, my + 100, on(cfg::esp_health)   + L"Health      F2", cfg::esp_health ? RGB(80,255,80) : RGB(220,80,80));
-        ov.text(mx + 12, my + 120, on(cfg::esp_skeleton) + L"Skeleton    F3", cfg::esp_skeleton ? RGB(80,255,80) : RGB(220,80,80));
-        ov.text(mx + 12, my + 140, on(cfg::aimbot)       + L"Aimbot      F4", cfg::aimbot ? RGB(80,255,80) : RGB(220,80,80));
-        ov.text(mx + 12, my + 160, on(cfg::team_check)   + L"Team Check  F5", cfg::team_check ? RGB(80,255,80) : RGB(220,80,80));
+        ov.text(mx + 12, my + 70,  on(cfg::esp_box)      + L"ESP Box     F1", cfg::esp_box ? RGB(80,255,80) : RGB(220,80,80));
+        ov.text(mx + 12, my + 90,  on(cfg::esp_health)   + L"Health      F2", cfg::esp_health ? RGB(80,255,80) : RGB(220,80,80));
+        ov.text(mx + 12, my + 110, on(cfg::esp_skeleton) + L"Skeleton    F3", cfg::esp_skeleton ? RGB(80,255,80) : RGB(220,80,80));
+        ov.text(mx + 12, my + 130, on(cfg::aimbot)       + L"Aimbot      F4", cfg::aimbot ? RGB(80,255,80) : RGB(220,80,80));
+        ov.text(mx + 12, my + 150, on(cfg::team_check)   + L"Team Check  F5", cfg::team_check ? RGB(80,255,80) : RGB(220,80,80));
 
         wchar_t buf[64];
-        swprintf_s(buf, L"Players visible: %d", players_found);
-        ov.text(mx + 12, my + 195, buf, players_found > 0 ? RGB(80,255,80) : RGB(255,180,0));
-        ov.text(mx + 12, my + 215, patterns_ok ? L"Patterns: OK" : L"Patterns: FAIL", patterns_ok ? RGB(80,255,80) : RGB(255,80,80));
+        swprintf_s(buf, L"Players: %d", players_found);
+        ov.text(mx + 12, my + 185, buf, players_found > 0 ? RGB(80,255,80) : RGB(255,180,0));
+        ov.text(mx + 12, my + 205, L"Offsets: Build 14200", RGB(100, 200, 100));
     }
 
     void draw_esp(const std::vector<Player>& list, const Matrix4x4& vm) {
@@ -209,7 +161,7 @@ public:
             if (!world_to_screen(p.head, head, vm, ov.w, ov.h)) continue;
 
             float height = feet.y - head.y;
-            float width  = height * 0.42f;
+            float width = height * 0.42f;
             int x = (int)(head.x - width / 2);
             int y = (int)head.y;
             int bw = (int)width;
@@ -235,30 +187,21 @@ public:
 
     void aim(const std::vector<Player>& list) {
         if (!(GetAsyncKeyState(cfg::aim_key) & 0x8000)) return;
-        auto local = local_pawn();
-        if (!local) return;
-
-        Vec3 origin = mem.read<Vec3>(local + offsets::m_vOldOrigin);
-        Vec3 viewOff = mem.read<Vec3>(local + offsets::m_vecViewOffset);
-        Vec3 eye = { origin.x + viewOff.x, origin.y + viewOff.y, origin.z + viewOff.z };
-
-        // We don't have a reliable viewangles offset auto-resolved in this version,
-        // so we use a pure mouse delta toward the target (works without viewangles).
-        float bestFov = cfg::aim_fov * 20.f; // screen-space approximation
-        Vec2  bestDelta{};
-        bool  found = false;
 
         Matrix4x4 vm = view_matrix();
         Vec2 center = { ov.w / 2.f, ov.h / 2.f };
 
+        float bestFov = cfg::aim_fov * 25.f;
+        Vec2 bestDelta{};
+        bool found = false;
+
         for (const auto& p : list) {
-            if (eye.dist(p.head) > cfg::max_dist * 40.f) continue;
             Vec2 screen;
             if (!world_to_screen(p.head, screen, vm, ov.w, ov.h)) continue;
 
             float dx = screen.x - center.x;
             float dy = screen.y - center.y;
-            float fov = std::sqrt(dx*dx + dy*dy);
+            float fov = std::sqrt(dx * dx + dy * dy);
             if (fov < bestFov) {
                 bestFov = fov;
                 bestDelta = { dx, dy };
@@ -267,26 +210,25 @@ public:
         }
         if (!found) return;
 
-        // smooth + micro jitter
         bestDelta.x /= cfg::aim_smooth;
         bestDelta.y /= cfg::aim_smooth;
-        bestDelta.x += (rand() % 3 - 1) * 0.4f;
-        bestDelta.y += (rand() % 3 - 1) * 0.4f;
+        bestDelta.x += (rand() % 3 - 1) * 0.35f;
+        bestDelta.y += (rand() % 3 - 1) * 0.35f;
 
         mouse_event(MOUSEEVENTF_MOVE, (DWORD)bestDelta.x, (DWORD)bestDelta.y, 0, 0);
     }
 
     void handle_hotkeys() {
-        static bool ins=false, f1=false, f2=false, f3=false, f4=false, f5=false;
+        static bool ins = false, f1 = false, f2 = false, f3 = false, f4 = false, f5 = false;
         if (GetAsyncKeyState(VK_INSERT) & 0x8000) {
-            if (!ins) { cfg::menu_open = !cfg::menu_open; ov.set_click_through(!cfg::menu_open); ins=true; }
-        } else ins=false;
+            if (!ins) { cfg::menu_open = !cfg::menu_open; ov.set_click_through(!cfg::menu_open); ins = true; }
+        } else ins = false;
 
-        if (GetAsyncKeyState(VK_F1) & 0x8000) { if (!f1) { cfg::esp_box=!cfg::esp_box; f1=true; } } else f1=false;
-        if (GetAsyncKeyState(VK_F2) & 0x8000) { if (!f2) { cfg::esp_health=!cfg::esp_health; f2=true; } } else f2=false;
-        if (GetAsyncKeyState(VK_F3) & 0x8000) { if (!f3) { cfg::esp_skeleton=!cfg::esp_skeleton; f3=true; } } else f3=false;
-        if (GetAsyncKeyState(VK_F4) & 0x8000) { if (!f4) { cfg::aimbot=!cfg::aimbot; f4=true; } } else f4=false;
-        if (GetAsyncKeyState(VK_F5) & 0x8000) { if (!f5) { cfg::team_check=!cfg::team_check; f5=true; } } else f5=false;
+        if (GetAsyncKeyState(VK_F1) & 0x8000) { if (!f1) { cfg::esp_box = !cfg::esp_box; f1 = true; } } else f1 = false;
+        if (GetAsyncKeyState(VK_F2) & 0x8000) { if (!f2) { cfg::esp_health = !cfg::esp_health; f2 = true; } } else f2 = false;
+        if (GetAsyncKeyState(VK_F3) & 0x8000) { if (!f3) { cfg::esp_skeleton = !cfg::esp_skeleton; f3 = true; } } else f3 = false;
+        if (GetAsyncKeyState(VK_F4) & 0x8000) { if (!f4) { cfg::aimbot = !cfg::aimbot; f4 = true; } } else f4 = false;
+        if (GetAsyncKeyState(VK_F5) & 0x8000) { if (!f5) { cfg::team_check = !cfg::team_check; f5 = true; } } else f5 = false;
         if (GetAsyncKeyState(VK_END) & 0x8000) PostQuitMessage(0);
     }
 

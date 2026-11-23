@@ -4,7 +4,6 @@
 #include <Windows.h>
 #include <TlHelp32.h>
 #include <cstdint>
-#include <string>
 
 class Memory {
 public:
@@ -52,11 +51,6 @@ public:
         T v{};
         ReadProcessMemory(hProcess, reinterpret_cast<LPCVOID>(addr), &v, sizeof(T), nullptr);
         return v;
-    }
-
-    bool read_raw(std::uintptr_t addr, void* buf, size_t size) {
-        SIZE_T br = 0;
-        return ReadProcessMemory(hProcess, reinterpret_cast<LPCVOID>(addr), buf, size, &br) && br == size;
     }
 
     void close() {

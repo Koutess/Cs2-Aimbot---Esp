@@ -3,18 +3,16 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <string>
-#include "math.hpp"
 
 class Overlay {
 public:
     HWND hwnd = nullptr;
     HDC  hdc = nullptr;
     int  w = 0, h = 0;
-    bool click_through = true;
 
-    static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wParam, LPARAM lParam) {
+    static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
-        return DefWindowProcW(h, m, wParam, lParam);
+        return DefWindowProcW(h, m, wp, lp);
     }
 
     bool create() {
@@ -31,27 +29,21 @@ public:
         hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
             L"Valve001", L"CS2 Overlay",
-            WS_POPUP,
-            0, 0, w, h,
+            WS_POPUP, 0, 0, w, h,
             nullptr, nullptr, wc.hInstance, nullptr);
 
         if (!hwnd) return false;
-
         SetLayeredWindowAttributes(hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
         ShowWindow(hwnd, SW_SHOW);
-        UpdateWindow(hwnd);
         hdc = GetDC(hwnd);
         set_click_through(true);
         return true;
     }
 
     void set_click_through(bool enable) {
-        click_through = enable;
         LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        if (enable)
-            ex |= WS_EX_TRANSPARENT;
-        else
-            ex &= ~WS_EX_TRANSPARENT;
+        if (enable) ex |= WS_EX_TRANSPARENT;
+        else        ex &= ~WS_EX_TRANSPARENT;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex);
     }
 

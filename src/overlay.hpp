@@ -20,10 +20,10 @@ public:
         h = GetSystemMetrics(SM_CYSCREEN);
 
         WNDCLASSEXW wc{ sizeof(wc) };
-        wc.lpfnWndProc   = WndProc;
-        wc.hInstance     = GetModuleHandleW(nullptr);
+        wc.lpfnWndProc = WndProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
         wc.lpszClassName = L"Valve001";
-        wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         RegisterClassExW(&wc);
 
         hwnd = CreateWindowExW(
